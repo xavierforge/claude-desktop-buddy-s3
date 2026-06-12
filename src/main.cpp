@@ -4,6 +4,7 @@
 #include "ble_bridge.h"
 #include "data.h"
 #include "buddy.h"
+#include "tunes.h"
 
 TFT_eSprite spr = TFT_eSprite(&M5.Lcd);
 
@@ -109,6 +110,7 @@ static void wake() {
 bool     responseSent = false;
 
 static void beep(uint16_t freq, uint16_t dur) {
+  if (dur <= 30) return;
   if (settings().sound) compat::beep(freq, dur);
 }
 
@@ -139,8 +141,8 @@ const uint8_t MENU_N = 6;
 
 bool    settingsOpen = false;
 uint8_t settingsSel  = 0;
-const char* settingsItems[] = { "brightness", "sound", "bluetooth", "wifi", "led", "transcript", "clock rot", "ascii pet", "reset", "back" };
-const uint8_t SETTINGS_N = 10;
+const char* settingsItems[] = { "brightness", "sound", "bluetooth", "wifi", "led", "transcript", "clock rot", "ascii pet", "wave", "volume", "reset", "back" };
+const uint8_t SETTINGS_N = 12;
 
 bool    resetOpen = false;
 uint8_t resetSel  = 0;
@@ -148,6 +150,16 @@ const char* resetItems[] = { "delete char", "factory reset", "back" };
 const uint8_t RESET_N = 3;
 static uint32_t resetConfirmUntil = 0;
 static uint8_t  resetConfirmIdx = 0xFF;
+
+// Main volume level table [waveform][level]: square wave draws more power, entire row is one tier lower to prevent battery overload restart
+static const uint8_t VOL_TABLE[2][5] = {
+  { 60, 90, 120, 145, 160 },   // wave=0 sine
+  { 48, 72,  96, 115, 128 },   // wave=1 square wave (2-channel data can relax 128 up to 145)
+};
+
+static void applyVolume() {
+  M5.Speaker.setVolume(VOL_TABLE[settings().wave][settings().vol]);
+}
 
 static void applySetting(uint8_t idx) {
   Settings& s = settings();
@@ -169,8 +181,18 @@ static void applySetting(uint8_t idx) {
     case 5: s.hud = !s.hud; break;
     case 6: s.clockRot = (s.clockRot + 1) % 3; break;
     case 7: nextPet(); return;
-    case 8: resetOpen = true; resetSel = 0; resetConfirmIdx = 0xFF; return;
-    case 9: settingsOpen = false; characterInvalidate(); return;
+    case 8: // wave: timbre toggle, takes effect immediately
+      s.wave = !s.wave;
+      tuneSetWave(s.wave);
+      applyVolume();
+      break;
+    case 9: // volume: cycle 0~4, beep once for preview
+      s.vol = (s.vol + 1) % 5;
+      applyVolume();
+      beep(1800, 60);
+      break;
+    case 10: resetOpen = true; resetSel = 0; resetConfirmIdx = 0xFF; return;
+    case 11: settingsOpen = false; characterInvalidate(); return;
   }
   settingsSave();
 }
@@ -277,6 +299,10 @@ static void drawSettings() {
       uint8_t total = buddySpeciesCount() + (gifAvailable ? 1 : 0);
       uint8_t pos   = buddyMode ? buddySpeciesIdx() + 1 : total;
       spr.printf("%u/%u", pos, total);
+    } else if (i == 8) {
+      spr.print(s.wave ? "sqr" : "sin");
+    } else if (i == 9) {
+      spr.printf("%u/4", s.vol);
     }
   }
   drawMenuHints(p, mx, mw, my + mh - 12, "Next", "Change");
@@ -940,7 +966,6 @@ void setup() {
   M5.begin(cfg);
   M5.Display.setRotation(0);
   M5.Speaker.begin();
-  M5.Speaker.setVolume(160);
   startBt();
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);   // off
@@ -949,6 +974,8 @@ void setup() {
   statsLoad();
   settingsLoad();
   petNameLoad();
+  tuneSetWave(settings().wave);
+  applyVolume();
   buddyInit();
 
   // BLE stays always-on; s.bt is stored as a preference only.
@@ -989,10 +1016,26 @@ void setup() {
 
 void loop() {
   M5.update();
+  tuneTick();
   t++;
   uint32_t now = millis();
 
   dataPoll(&tama);
+
+  // --- Music triggers: edge detection on task state ---
+  static int  prevRunning   = 0;
+  static bool prevCompleted = false;
+  if (settings().sound) {
+    if (tama.sessionsRunning > 0 && prevRunning == 0)
+      bgmStart(SLOT_BGM);                       // 0 -> running: start BGM
+    if (tama.recentlyCompleted && !prevCompleted)
+      jingleStart(SLOT_DONE);                   // completed: play the done jingle, then auto-return to BGM
+  }
+  if (tama.sessionsRunning == 0 && prevRunning > 0)
+    bgmStop();                                  // all tasks finished: wind down the BGM
+  prevRunning   = tama.sessionsRunning;
+  prevCompleted = tama.recentlyCompleted;
+
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
 
@@ -1028,7 +1071,10 @@ void loop() {
     if (tama.promptId[0]) {
       promptArrivedMs = millis();
       wake();
-      beep(1200, 80);   // alert chirp
+
+      if (SLOT_ALERT && settings().sound) jingleStart(SLOT_ALERT);
+      else beep(1200, 80);   // no alert.h installed — keep the original beep
+
       // Jump to the approval screen no matter what was open — drawApproval
       // only runs from drawHUD which only runs in DISP_NORMAL.
       displayMode = DISP_NORMAL;
@@ -1084,7 +1130,10 @@ void loop() {
         responseSent = true;
         uint32_t tookS = (millis() - promptArrivedMs) / 1000;
         statsOnApproval(tookS);
-        beep(2400, 60);
+
+        if (SLOT_APPROVE && settings().sound) jingleStart(SLOT_APPROVE);
+        else beep(2400, 60);
+
         if (tookS < 5) triggerOneShot(P_HEART, 2000);
       } else if (resetOpen) {
         beep(1800, 30);
@@ -1106,17 +1155,33 @@ void loop() {
     swallowBtnA = false;
   }
 
+  // A deny clears inPrompt via responseSent while B is still physically
+  // held — without the latch, the same press then crosses the hold
+  // threshold and wasHold() fires the manual BGM toggle on top of the
+  // deny jingle. Latch the press at deny and ignore it until release.
+  static bool btnBDenyPress = false;
+  if (M5.BtnB.wasHold() && !inPrompt && !btnBDenyPress) {
+    // tuneSkip, not bgmStop: skip a playing jingle (done) back to BGM/idle,
+    // or — when BGM itself is playing — stop it. Future alerts unaffected.
+    if (tunePlaying()) tuneSkip();
+    else if (settings().sound) bgmStart(SLOT_BGM);
+  }
+
   // BtnB: pet → heart
   if (M5.BtnB.wasPressed()) {
     if (swallowBtnB) { swallowBtnB = false; }
     else
     if (inPrompt) {
+      btnBDenyPress = true;
       char cmd[96];
       snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"deny\"}", tama.promptId);
       sendCmd(cmd);
       responseSent = true;
       statsOnDenial();
-      beep(600, 60);
+
+      if (SLOT_DENY && settings().sound) jingleStart(SLOT_DENY);
+      else beep(600, 60);
+
     } else if (resetOpen) {
       beep(2400, 30);
       applyReset(resetSel);
@@ -1138,6 +1203,7 @@ void loop() {
       msgScroll = (msgScroll >= 30) ? 0 : msgScroll + 1;
     }
   }
+  if (M5.BtnB.wasReleased()) btnBDenyPress = false;
 
   // blink bookkeeping
 
