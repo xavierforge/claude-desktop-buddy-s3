@@ -170,7 +170,15 @@ inline void dataPoll(TamaState* out) {
     if (c == '\n' || c == '\r') {
       if (_btLine.len > 0) {
         _btLine.buf[_btLine.len] = 0;
-        if (_btLine.buf[0] == '{') _applyJson(_btLine.buf, out);
+        if (_btLine.buf[0] == '{') {
+          _applyJson(_btLine.buf, out);
+          // App-level heartbeat: every macOS-side liveness signal
+          // (is_connected, write acks, the notification stream) keeps
+          // reporting "fine" after this device reboots. An ack per
+          // received line is the only thing a dead link can't fake —
+          // the bridge restarts itself when these go quiet.
+          bleWrite((const uint8_t*)"{\"ack\":1}\n", 10);
+        }
         _btLine.len = 0;
       }
     } else if (_btLine.len < sizeof(_btLine.buf) - 1) {
