@@ -1,5 +1,19 @@
 # claude-desktop-buddy (M5StickC Plus **S3** port)
 
+A Claude desk pet that lives on an **M5StickC Plus S3**, reacts to your Claude
+sessions, and lets you approve permission prompts from its physical buttons.
+Building on the upstream firmware and its S3 port (see the fork note below),
+this branch adds:
+
+- **🎵 A music engine.** Five optional, hot-swappable tune slots — looping BGM
+  while a task runs, a jingle when it finishes, and feedback sounds on
+  approve/deny/alert. Bring your own MIDI or WAV; missing slots fall back to
+  beeps. Selectable timbre and volume. See [Music](#music-tune-slots).
+- **⌨️ Terminal Claude Code support.** A companion host daemon,
+  [buddy-bridge](https://github.com/xavierforge/buddy-bridge), drives the Stick
+  from plain `claude` in a terminal — **no desktop app required**. It survives
+  device reboots and reconnects on its own. See [Pairing](#pairing).
+
 > **Unofficial fork.** This branch ports the upstream firmware from the
 > original M5StickC Plus (ESP32) to the newer **M5StickC Plus S3** (ESP32-S3).
 > Upstream explicitly does not accept board-port PRs — see
@@ -81,6 +95,19 @@ Once running, you can also wipe everything from the device itself: **hold A
 
 ## Pairing
 
+The Stick is a single-central BLE device — exactly one host owns it at a time.
+Pick the host that matches how you use Claude:
+
+- **Desktop app** — drives the Stick for the sessions *it* runs (Claude Cowork
+  and Code inside the app). Set up below.
+- **Terminal `claude`** — to drive the Stick from plain `claude` in a terminal,
+  run the companion daemon [buddy-bridge](https://github.com/xavierforge/buddy-bridge)
+  instead. It becomes the BLE central in the app's place, so **no desktop app
+  is needed**; its README covers install and first-pair. (Already connected via
+  the app? "Forget" the Stick there first — only one central at a time.)
+
+### Via the desktop app
+
 To pair your device with Claude, first enable developer mode (**Help →
 Troubleshooting → Enable Developer Mode**). Then, open the Hardware Buddy
 window in **Developer → Open Hardware Buddy…**, click **Connect**, and pick
@@ -117,8 +144,22 @@ approval prompt is up). Any button press wakes it.
 ## ASCII pets
 
 Eighteen pets, each with seven animations (sleep, idle, busy, attention,
-celebrate, dizzy, heart). Menu → "next pet" cycles them with a counter.
-Choice persists to NVS.
+celebrate, dizzy, heart). **Settings → ascii pet** cycles them with a counter
+shown as `n/18`; the choice persists to NVS.
+
+The counter is 1-based on screen, so the menu number is the table index + 1:
+
+| # | Pet | # | Pet | # | Pet |
+|---|-----|---|-----|---|-----|
+| 1 | capybara | 7 | octopus | 13 | axolotl |
+| 2 | duck     | 8 | owl     | 14 | cactus  |
+| 3 | goose    | 9 | penguin | 15 | robot   |
+| 4 | blob     | 10 | turtle | 16 | rabbit  |
+| 5 | cat      | 11 | snail  | 17 | mushroom |
+| 6 | dragon   | 12 | ghost  | 18 | chonk   |
+
+(If a GIF character is installed, the counter's last position is the GIF;
+the ASCII species occupy 1–18 ahead of it.)
 
 ## GIF pets
 
@@ -182,6 +223,66 @@ If you're iterating on a character and would rather skip the BLE round-trip,
 | `dizzy`     | you shook the stick         | spiral eyes, wobbling       |
 | `heart`     | approved in under 5s        | floating hearts             |
 
+## Music (tune slots)
+
+The buddy can score your sessions: looping background music while a task
+runs, a jingle when one finishes, and feedback sounds on permission prompts.
+Sound is **opt-in per slot** — drop in only the tunes you want, leave the
+rest out, and the missing ones fall back to the original beeps.
+
+Five slots, each an optional header in `src/tunes/`:
+
+```
+src/
+├── tune_types.h      shared structs (ToneEvent / Tune)
+├── tune_player.h     BGM loop + jingle interrupt + auto-return to BGM
+├── tunes.h           the slot registry (which file fills which slot)
+├── tunes/            <- drop your own tunes here (gitignored: personal media)
+│   ├── bgm.h         background music while tasks run (loops)
+│   ├── alert.h       a permission prompt arrived
+│   ├── approve.h     you pressed approve
+│   ├── deny.h        you pressed deny
+│   └── done.h        a task finished (auto-returns to BGM)
+└── main.cpp          triggers the slots on task-state edges
+```
+
+**Auto-skip when a slot is empty.** `tunes.h` resolves each slot at compile
+time with `__has_include("tunes/bgm.h")` (a C++17 preprocessor check): file
+present → include it and point the slot at the tune; absent → the slot is
+`nullptr`. Every player call is guarded (`if (t && (t->len || t->pcm))`), so
+calling a null slot is simply a no-op. A fresh checkout with an empty
+`tunes/` compiles and runs fine — slots just stay silent (the beeps remain).
+
+**Two source formats**, both converted to a header by a tool in `tools/`:
+
+| Format | Tool | Good for |
+|--------|------|----------|
+| Tone events | `midi2tones.py` (voice-aware, 3-channel chiptune) | melodies, BGM |
+| 8-bit PCM | `wav2raw.py` (16 kHz mono) | recorded SFX, voices |
+
+```bash
+python tools/midi2tones.py song.mid bgm > src/tunes/bgm.h
+python tools/midi2tones.py ping.mid alert > src/tunes/alert.h
+python tools/wav2raw.py buzz.wav deny > src/tunes/deny.h  # optional gain 0.05-1.0
+
+# fill any subset of bgm/alert/approve/deny/done, then:
+pio run -t upload
+```
+
+The second argument is the slot name; the converters emit matching symbols
+(`TUNE_BGM`, `TUNE_ALERT`, …) so five tunes never collide.
+
+**Playback model.** A jingle (alert/approve/done) interrupts the looping BGM
+and hands back to it when it ends. **Settings → wave** toggles a soft
+sine/square timbre and **→ volume** is a 5-step level (square runs one tier
+quieter to keep the speaker from browning out the rail). **Hold B** skips the
+playing jingle — or stops BGM if that's what's playing — without muting the
+feedback sounds that follow.
+
+> The desktop app feeds task state automatically. For terminal `claude`,
+> [buddy-bridge](https://github.com/xavierforge/buddy-bridge) feeds the same
+> state over BLE (see [Pairing](#pairing)) so BGM/done work there too.
+
 ## Project layout
 
 ```
@@ -194,6 +295,8 @@ src/
   data.h         — wire protocol, JSON parse
   xfer.h         — folder push receiver
   stats.h        — NVS-backed stats, settings, owner, species choice
+  tune_*.h       — tune slot registry + player (see Music)
+  tunes/         — optional per-slot tune headers (gitignored)
 characters/      — example GIF character packs
 tools/           — generators and converters
 ```
