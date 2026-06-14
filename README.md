@@ -14,6 +14,13 @@ this branch adds:
   from plain `claude` in a terminal — **no desktop app required**. It survives
   device reboots and reconnects on its own. See [Pairing](#pairing).
 
+https://github.com/user-attachments/assets/e8acea34-4065-4157-9e0b-9c3287ebea35
+
+
+> 🔊 Sound on! The music engine is half the demo.
+
+---
+
 > **Unofficial fork.** This branch ports the upstream firmware from the
 > original M5StickC Plus (ESP32) to the newer **M5StickC Plus S3** (ESP32-S3).
 > Upstream explicitly does not accept board-port PRs — see
